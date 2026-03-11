@@ -1,0 +1,15 @@
+# Binaries
+tether
+tether-linux
+tether-darwin
+tether-darwin-arm64
+tether-darwin-amd64
+tether-linux-amd64
+service-proxy
+service-proxy-linux
+
+# IDE / local
+.claude/
+
+# macOS
+.DS_Store
