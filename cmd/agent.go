@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/imranroshan/tether/internal/agent"
+	"github.com/1mr0-tech/tether/internal/agent"
 	"github.com/spf13/cobra"
 )
 

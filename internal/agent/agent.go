@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/hashicorp/yamux"
-	"github.com/imranroshan/tether/internal/tunnel"
+	"github.com/1mr0-tech/tether/internal/tunnel"
 )
 
 type Config struct {

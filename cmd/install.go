@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	k8sinternal "github.com/imranroshan/tether/internal/k8s"
+	k8sinternal "github.com/1mr0-tech/tether/internal/k8s"
 	"github.com/spf13/cobra"
 )
 

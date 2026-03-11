@@ -1,4 +1,4 @@
-module github.com/imranroshan/tether
+module github.com/1mr0-tech/tether
 
 go 1.22
 

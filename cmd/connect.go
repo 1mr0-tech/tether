@@ -3,8 +3,8 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/imranroshan/tether/internal/client"
-	"github.com/imranroshan/tether/internal/token"
+	"github.com/1mr0-tech/tether/internal/client"
+	"github.com/1mr0-tech/tether/internal/token"
 	"github.com/spf13/cobra"
 )
 

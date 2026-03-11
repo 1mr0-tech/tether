@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"github.com/imranroshan/tether/internal/relay"
+	"github.com/1mr0-tech/tether/internal/relay"
 	"github.com/spf13/cobra"
 )
 

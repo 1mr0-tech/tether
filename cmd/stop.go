@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	k8sinternal "github.com/imranroshan/tether/internal/k8s"
-	"github.com/imranroshan/tether/internal/token"
+	k8sinternal "github.com/1mr0-tech/tether/internal/k8s"
+	"github.com/1mr0-tech/tether/internal/token"
 	"github.com/spf13/cobra"
 )
 

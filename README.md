@@ -13,76 +13,91 @@ Route traffic from a Kubernetes service to your local machine — no VPN, no clu
 
 Three pieces work together:
 
-1. **Relay server** — a TCP server with a stable IP reachable from both the cluster and developer machines. Ops deploys this once.
-2. **Agent pod** — a persistent pod in the `tether` namespace. Ops installs this once per cluster. It dynamically intercepts traffic on demand.
-3. **CLI** — ops uses it to start/stop interceptions. Developers use it to forward traffic to their local port.
+1. **Relay server** — a TCP server reachable from both the cluster and developer machines. Can run in-cluster (recommended) or on any host with a stable IP.
+2. **Agent pod** — a persistent pod in the `tether` namespace. Installed once per cluster. Dynamically intercepts traffic on demand without restarting.
+3. **CLI** — ops uses it to start/stop interceptions. Developers use it to forward intercepted traffic to their local port.
 
 Developers need **zero Kubernetes knowledge** and **zero cluster access**. They only need a session token from ops and the `tether` binary.
 
 ---
 
-## For Ops: One-time Setup
+## For Ops: Install tether on a cluster
 
-### 1. Deploy the relay server
-
-The relay must be reachable from both the cluster and developer machines. Run it on any host with a stable IP or hostname.
+Use the interactive installer from inside the tether repo:
 
 ```bash
-tether server --addr :8080
+./scripts/cluster-install.sh
 ```
 
-To run it as a systemd service, Docker container, or in-cluster LoadBalancer — any approach works as long as it stays up and both sides can reach it.
+The script handles everything:
 
-### 2. Install the agent into the cluster
+1. **Detects the cluster type** automatically from your kubeconfig — k3d, k3s (local or remote)
+2. **Asks where the relay should run:**
+   - **In the cluster** — deploys relay as a Deployment with a NodePort service in the `tether` namespace. Recommended for shared dev servers (k3s). Relay is always-on with no local process needed.
+   - **Local machine** — relay runs as a `tether server` process on your machine. Recommended for personal k3d setups.
+3. **Scans for a free NodePort** (>31000) and lets you override if needed
+4. **Builds the Docker image** locally via `docker build`
+5. **Imports the image directly** into the cluster — no registry required:
+   - k3d: `k3d image import`
+   - k3s (local): `sudo k3s ctr images import`
+   - k3s (remote): copies via SCP and imports over SSH
+6. **Deploys** the relay (if in-cluster) and agent to the `tether` namespace
+7. **Prints** the exact `tether start` command to use going forward
 
-```bash
-tether install
-```
+### Requirements
 
-This is interactive. It asks:
-- Whether the relay is on localhost (for local k3d/k3s development) or an external address
-- The relay address and port
-- The agent container image to use
+- `kubectl` connected to the cluster (`~/.kube/config` or `$KUBECONFIG`)
+- `docker` available locally
+- For remote k3s: SSH access to the node (key-based or password)
+- For k3d: `k3d` CLI installed
 
-It then deploys a persistent `tether-agent` pod in the `tether` namespace. This pod stays running and handles all future interceptions — no per-session deployments.
+### RBAC
 
-**Build and push the agent image first:**
-```bash
-docker build -t your-registry/tether:latest .
-docker push your-registry/tether:latest
-```
-
-### 3. RBAC for ops
-
-The ops user running `tether install` and `tether start` needs permission to:
-- Create namespaces (for the `tether` namespace)
-- Create Deployments in the `tether` namespace
-- Get/patch Services and Endpoints in the target namespaces
+The ops user running `tether start` and `tether stop` needs permission to:
+- Get/patch Services and Endpoints in target namespaces
 
 A cluster-admin kubeconfig works. For a more restricted setup, scope permissions to the `tether` namespace plus any namespaces you'll intercept.
 
 ---
 
-## For Ops: Intercepting a Service
+## For Ops: Intercepting a service
 
-### Start an interception
+### On a shared dev server (recommended)
+
+If tether is installed on a shared server (e.g. the k3s node itself), SSH in and run the interactive intercept script:
+
+```bash
+ssh devserver@<server>
+tether-intercept
+```
+
+The script:
+1. Lists available namespaces (filters out system namespaces)
+2. Lists deployments in the chosen namespace
+3. Runs `tether start` and displays the session token prominently
+4. Copies the `tether connect` command to clipboard if available
+
+Share the printed command with the developer.
+
+### Manually (any machine with kubeconfig)
 
 ```bash
 tether start <deployment-name> -n <namespace> --relay <relay-addr>
 ```
 
-This finds the Service that targets the given Deployment, redirects its traffic to the agent pod, and prints a ready-to-run command for the developer:
-
+Example output:
 ```
-$ tether start backend -n demo --relay relay.company.internal:8080
+Found service backend (targetPort: 8080)
+Opening relay session...
 
-Session token: eyJpZCI6IjRmOWEyYzFkOGUzYjdmMDUiLCJyZWxheSI6InJlbGF5LmNvbXBhbnkuaW50ZXJuYWw6ODA4MCJ9
+Intercepting demo/backend → developer laptop
 
-Run this on the developer machine:
-  tether connect --session eyJpZCI6IjRmOWEyYzFkOGUzYjdmMDUiLCJyZWxheSI6InJlbGF5LmNvbXBhbnkuaW50ZXJuYWw6ODA4MCJ9 --port <local-port>
+Share this with the developer:
+
+  tether connect --session eyJpZCI6... --port <local-port>
+
+To stop:  tether stop --session eyJpZCI6...
 ```
-
-Share the printed `tether connect` command with the developer — they paste it in and add their local port number.
 
 ### Stop an interception
 
@@ -90,62 +105,53 @@ Share the printed `tether connect` command with the developer — they paste it 
 tether stop --session <token>
 ```
 
-This restores the original service routing and releases the port on the agent pod.
+Restores the original service routing immediately.
+
+> **Note:** `tether start` and `tether stop` must be run on the same machine — session state is saved locally at `~/.tether/sessions/`.
 
 ---
 
 ## For Developers: Connect to an intercepted service
 
-You need two things from ops:
-- The `tether` binary installed on your machine
-- The session token (a `tether connect` command from ops)
+### 1. Install tether (one-time)
 
-### Install the CLI
-
-**macOS / Linux — build from source (requires Go 1.24+):**
 ```bash
-git clone https://github.com/your-org/tether
-cd tether
-go build -o tether .
-sudo mv tether /usr/local/bin/
+curl -fsSL https://raw.githubusercontent.com/1mr0-tech/tether/main/scripts/install-tether.sh | bash
 ```
 
-**Or download a pre-built binary** (when releases are published):
-```bash
-# macOS arm64
-curl -fsSL https://github.com/your-org/tether/releases/latest/download/tether-darwin-arm64 \
-  -o /usr/local/bin/tether && chmod +x /usr/local/bin/tether
-```
+The script detects your OS and architecture, checks for Go (installs it if missing), builds tether from source, and installs the binary to `/usr/local/bin/tether`.
 
-### Connect
+### 2. Connect
 
-Paste the command that ops gave you and add `--port` for your local server:
+Paste the command ops sent you and add `--port` for your local server:
 
 ```bash
 tether connect --session eyJ... --port 3000
 ```
 
-That's it. Traffic hitting the intercepted service in the cluster now arrives at `localhost:3000` on your machine. Run your local dev server on that port.
+That's it. Traffic hitting the intercepted service in the cluster now arrives at `localhost:3000`. Run your local dev server on that port.
 
-Press **Ctrl+C** to disconnect. The service keeps running for other developers — only your local forwarding stops.
+Press **Ctrl+C** to disconnect. The cluster service keeps running for others — only your local forwarding stops.
 
 ---
 
 ## Local development with k3d
 
-When the relay runs on your laptop alongside k3d, use the interactive installer — it automatically configures the correct address for pods to reach the relay via `host.docker.internal`.
+Run `./scripts/cluster-install.sh`, choose **"Local machine"** for the relay, and the script configures everything automatically:
+
+- Agent pods connect to the relay via `host.docker.internal`
+- Ops and developers connect via your detected LAN IP
+
+Then start the relay before intercepting:
 
 ```bash
 # Terminal 1: start relay
-tether server --addr :8085
+tether server --addr :8080
 
-# Terminal 2: install agent (choose "localhost" when prompted)
-tether install
+# Terminal 2: intercept a service
+tether start backend -n demo --relay <your-lan-ip>:8080
 
-# Terminal 3: start interception
-tether start backend -n demo --relay localhost:8085
-
-# Terminal 4: connect (as developer)
+# Developer machine: connect
 tether connect --session eyJ... --port 3000
 ```
 
@@ -153,37 +159,36 @@ tether connect --session eyJ... --port 3000
 
 ## Crash recovery
 
-If `tether stop` was never run (CLI crashed, power loss), session state is saved at:
+If `tether stop` was never run (CLI crashed, machine rebooted), session state is saved at:
 
 ```
 ~/.tether/sessions/<session-id>.json
 ```
 
-Restore manually:
+Run `tether stop` with the original token — it loads state from disk and restores the service:
 
 ```bash
 tether stop --session <token>
 ```
 
-If you have the token, the above will work even after a crash — it loads state from disk and restores the service.
-
 To find active sessions, check which services have a missing selector:
+
 ```bash
 kubectl get svc -n <namespace> -o jsonpath='{range .items[*]}{.metadata.name}: {.spec.selector}{"\n"}{end}'
-# A service with no selector output is being intercepted
+# A service with empty selector output is currently being intercepted
 ```
 
 ---
 
-## How traffic interception works (under the hood)
+## How traffic interception works
 
-1. `tether start` finds the Service that routes to the target Deployment, reads its `spec.selector` and `targetPort`, and saves them to `~/.tether/sessions/<id>.json`.
-2. The service's `spec.selector` is removed and manual `Endpoints` are created pointing to the always-on agent pod IP (cross-namespace).
-3. A control message is sent to the agent pod via the relay: "listen on port `<targetPort>` for session `<id>`".
-4. The agent pod starts listening on that port and opens a yamux tunnel to the relay.
-5. When the developer runs `tether connect`, it connects to the relay from the other side, accepting yamux streams and forwarding each one to `localhost:<local-port>`.
-6. For every inbound TCP connection the agent receives, it opens a yamux stream through the relay. The developer's CLI accepts the stream and dials their local port.
-7. On `tether stop`: original selector is restored, manual Endpoints deleted, and the agent port is released.
+1. `tether start` finds the Service targeting the Deployment, reads its `spec.selector` and `targetPort`, saves them to `~/.tether/sessions/<id>.json`.
+2. The service's `spec.selector` is removed and manual `Endpoints` are created pointing to the always-on agent pod IP.
+3. A control message is sent to the agent pod via the relay: *"listen on port `<targetPort>` for session `<id>`"*.
+4. The agent starts listening on that port and opens a yamux tunnel to the relay.
+5. When the developer runs `tether connect`, it connects to the relay from the other side, accepting yamux streams and forwarding each to `localhost:<local-port>`.
+6. For every inbound TCP connection the agent receives, it opens a yamux stream through the relay. The developer's CLI accepts the stream and dials the local port.
+7. On `tether stop`: original selector is restored, manual Endpoints deleted, agent port released.
 
 The relay is protocol-agnostic — it forwards raw bytes. HTTP, gRPC, WebSockets, and plain TCP all work.
 
@@ -191,7 +196,7 @@ The relay is protocol-agnostic — it forwards raw bytes. HTTP, gRPC, WebSockets
 
 ## Security notes
 
-- **Session tokens** encode a 128-bit cryptographically random session ID. They act as an unguessable shared secret between agent and CLI.
+- **Session tokens** encode a 128-bit cryptographically random session ID. They act as an unguessable shared secret between agent and developer CLI.
 - **The relay has no authentication** beyond session IDs. Run it on a private network or restrict inbound access to developer and cluster IPs.
 - TLS on the relay connection is planned for a future release.
 
@@ -199,40 +204,44 @@ The relay is protocol-agnostic — it forwards raw bytes. HTTP, gRPC, WebSockets
 
 ## Troubleshooting
 
-**Agent pod not found after `tether install`**
+**Agent pod not connecting to relay**
 ```bash
-kubectl get pods -n tether
 kubectl logs -n tether -l app=tether-agent
 ```
-Most common cause: the agent can't reach the relay. Verify the relay address resolves from inside the cluster.
+Most common cause: the relay address is unreachable from inside the cluster. Verify the relay address and port from a pod in the cluster.
 
 **Service gets no traffic after `tether start`**
 ```bash
 kubectl get endpoints -n <namespace> <service-name>
 ```
-The endpoint should show the agent pod IP. If empty, the agent pod IP may have changed since install — re-run `tether install`.
+The endpoint should show the agent pod IP. If empty, check that the agent pod is running:
+```bash
+kubectl get pods -n tether
+```
 
 **Developer can't connect**
 ```bash
-# Check relay is running
+# Check relay is reachable
 nc -zv <relay-host> <relay-port>
-
-# Check session token is valid
-tether connect --session <token> --port 9999
 ```
-If connection times out, the relay is unreachable. Check firewall rules.
+If connection times out, check firewall rules between the developer's machine and the relay.
 
-**Service is stuck with no selector**
+**Service is stuck with no selector after a crash**
+
+If you have the token:
 ```bash
 tether stop --session <token>
 ```
-If you don't have the token but have the session ID:
+
+If you don't have the token, restore manually with kubectl:
 ```bash
-# The session ID is the file in ~/.tether/sessions/
-ls ~/.tether/sessions/
-```
-Then reconstruct the token or restore the service directly with kubectl:
-```bash
-kubectl patch svc <name> -n <namespace> --type=merge -p '{"spec":{"selector":{"app":"<original-label-value>"}}}'
+kubectl patch svc <name> -n <namespace> --type=merge \
+  -p '{"spec":{"selector":{"app":"<original-label-value>"}}}'
 kubectl delete endpoints <name> -n <namespace>
 ```
+
+---
+
+## Repository
+
+[https://github.com/1mr0-tech/tether](https://github.com/1mr0-tech/tether)
