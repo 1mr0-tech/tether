@@ -11,13 +11,16 @@ import (
 
 const handshakeTimeout = 30 * time.Second
 
+// Server is the relay TCP server. It bridges agent ↔ developer CLI connections
+// and routes control messages from ops to the persistent agent control channel.
 type Server struct {
 	addr     string
+	psk      string // pre-shared key; empty string disables PSK check (dev/test only)
 	registry *Registry
 }
 
-func NewServer(addr string) *Server {
-	return &Server{addr: addr, registry: NewRegistry()}
+func NewServer(addr, psk string) *Server {
+	return &Server{addr: addr, psk: psk, registry: NewRegistry()}
 }
 
 func (s *Server) ListenAndServe() error {
@@ -35,12 +38,13 @@ func (s *Server) ListenAndServe() error {
 	}
 }
 
-// handshake is the first JSON message sent by any connecting party.
+// handshake is the first JSON message sent by every connecting party.
 type handshake struct {
 	Role    string `json:"role"`    // "control", "ops", "agent", "client"
 	Action  string `json:"action"`  // ops only: "open" or "close"
 	Session string `json:"session"` // agent, client, ops
 	Port    int    `json:"port"`    // ops "open" only
+	PSK     string `json:"psk"`     // pre-shared key — must match server's PSK
 }
 
 func (s *Server) handle(conn net.Conn) {
@@ -48,45 +52,48 @@ func (s *Server) handle(conn net.Conn) {
 
 	var hs handshake
 	if err := json.NewDecoder(conn).Decode(&hs); err != nil {
-		log.Printf("handshake error: %v", err)
-		conn.Close()
+		log.Printf("relay: handshake error from %s: %v", conn.RemoteAddr(), err)
+		_ = conn.Close()
 		return
 	}
 	_ = conn.SetDeadline(time.Time{})
 
+	// Reject connections with a wrong or missing PSK.
+	if s.psk != "" && hs.PSK != s.psk {
+		log.Printf("relay: rejected connection from %s: invalid PSK", conn.RemoteAddr())
+		_ = conn.Close()
+		return
+	}
+
 	switch hs.Role {
 
 	case "control":
-		// Persistent connection from the always-on agent pod.
-		log.Printf("relay: agent control connection established")
+		log.Printf("relay: agent control connection established from %s", conn.RemoteAddr())
 		s.registry.RunControl(conn)
 		log.Printf("relay: agent control connection lost")
-		conn.Close()
+		_ = conn.Close()
 
 	case "ops":
-		// One-off command from ops CLI (start/stop).
 		s.handleOps(conn, hs.Action, hs.Session, hs.Port)
-		conn.Close()
+		_ = conn.Close()
 
 	case "agent":
-		// Per-session data connection from agent (one per active intercept connection).
 		if hs.Session == "" {
-			conn.Close()
+			_ = conn.Close()
 			return
 		}
 		s.handleData(conn, hs.Session, "agent")
 
 	case "client":
-		// Developer CLI data connection.
 		if hs.Session == "" {
-			conn.Close()
+			_ = conn.Close()
 			return
 		}
 		s.handleData(conn, hs.Session, "client")
 
 	default:
-		log.Printf("relay: unknown role %q", hs.Role)
-		conn.Close()
+		log.Printf("relay: unknown role %q from %s", hs.Role, conn.RemoteAddr())
+		_ = conn.Close()
 	}
 }
 
@@ -108,7 +115,7 @@ func (s *Server) handleOps(conn net.Conn, action, session string, port int) {
 		return
 	}
 
-	log.Printf("relay: ops command action=%s session=%s port=%d", action, session, port)
+	log.Printf("relay: ops %s session=%s port=%d", action, session, port)
 	if err := s.registry.SendControl(action, session, port); err != nil {
 		log.Printf("relay: control error: %v", err)
 		respond("error", err.Error())
@@ -129,7 +136,7 @@ func (s *Server) handleData(conn net.Conn, session, role string) {
 	}
 	if err != nil {
 		log.Printf("relay: register %s: %v", role, err)
-		conn.Close()
+		_ = conn.Close()
 		return
 	}
 
@@ -137,7 +144,7 @@ func (s *Server) handleData(conn net.Conn, session, role string) {
 	entry, err = s.registry.WaitForPeer(session, role)
 	if err != nil {
 		log.Printf("relay: %v", err)
-		conn.Close()
+		_ = conn.Close()
 		return
 	}
 

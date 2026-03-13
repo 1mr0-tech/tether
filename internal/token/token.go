@@ -7,10 +7,12 @@ import (
 )
 
 // Session is the opaque token handed to developers.
-// It encodes everything needed to connect — relay address and session ID.
+// It encodes relay address, session ID, and the pre-shared key —
+// everything needed to connect without any manual configuration.
 type Session struct {
 	ID    string `json:"id"`
 	Relay string `json:"relay"`
+	PSK   string `json:"psk"`
 }
 
 func Encode(t Session) string {
@@ -27,7 +29,7 @@ func Decode(s string) (Session, error) {
 	if err := json.Unmarshal(data, &t); err != nil {
 		return Session{}, fmt.Errorf("invalid session token")
 	}
-	if t.ID == "" || t.Relay == "" {
+	if t.ID == "" || t.Relay == "" || t.PSK == "" {
 		return Session{}, fmt.Errorf("invalid session token: missing fields")
 	}
 	return t, nil

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -48,20 +49,21 @@ var demoServerCmd = &cobra.Command{
 			if upstream == "" {
 				return fmt.Errorf("DEMO_UPSTREAM must be set for backend mode")
 			}
+			httpClient := &http.Client{Timeout: 10 * time.Second}
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				resp, err := http.Get(upstream + "/")
+				resp, err := httpClient.Get(upstream + "/") //nolint:noctx
 				if err != nil {
 					http.Error(w, `{"error":"upstream unreachable"}`, http.StatusBadGateway)
 					return
 				}
 				defer resp.Body.Close()
-				var upstream_data interface{}
-				_ = json.NewDecoder(resp.Body).Decode(&upstream_data)
+				var upstreamData interface{}
+				_ = json.NewDecoder(resp.Body).Decode(&upstreamData)
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"service":       "backend",
 					"processed":     true,
-					"upstream_data": upstream_data,
+					"upstream_data": upstreamData,
 				})
 			})
 
@@ -69,19 +71,20 @@ var demoServerCmd = &cobra.Command{
 			if upstream == "" {
 				return fmt.Errorf("DEMO_UPSTREAM must be set for frontend mode")
 			}
+			httpClient := &http.Client{Timeout: 10 * time.Second}
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				resp, err := http.Get(upstream + "/")
+				resp, err := httpClient.Get(upstream + "/") //nolint:noctx
 				if err != nil {
 					http.Error(w, `{"error":"upstream unreachable"}`, http.StatusBadGateway)
 					return
 				}
 				defer resp.Body.Close()
-				var backend_data interface{}
-				_ = json.NewDecoder(resp.Body).Decode(&backend_data)
+				var backendData interface{}
+				_ = json.NewDecoder(resp.Body).Decode(&backendData)
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"service":      "frontend",
-					"backend_data": backend_data,
+					"backend_data": backendData,
 				})
 			})
 
@@ -89,8 +92,14 @@ var demoServerCmd = &cobra.Command{
 			return fmt.Errorf("unknown DEMO_MODE %q — set to frontend, backend, or database-api", mode)
 		}
 
+		srv := &http.Server{
+			Addr:         ":" + port,
+			Handler:      mux,
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+		}
 		log.Printf("demo-server [%s] listening on :%s", mode, port)
-		return http.ListenAndServe(":"+port, mux)
+		return srv.ListenAndServe()
 	},
 }
 

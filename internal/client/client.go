@@ -12,9 +12,10 @@ import (
 )
 
 type Config struct {
-	RelayAddr  string
-	SessionID  string
-	LocalPort  int
+	RelayAddr string
+	SessionID string
+	LocalPort int
+	PSK       string // pre-shared key decoded from the session token
 }
 
 // Run connects to the relay, acts as yamux server (accepts streams),
@@ -26,17 +27,17 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	defer relayConn.Close()
 
-	// Send handshake
 	hs := map[string]interface{}{
 		"role":    "client",
 		"session": cfg.SessionID,
 		"port":    cfg.LocalPort,
+		"psk":     cfg.PSK,
 	}
 	if err := json.NewEncoder(relayConn).Encode(hs); err != nil {
 		return fmt.Errorf("client: handshake: %w", err)
 	}
 
-	// CLI is yamux server — accepts streams opened by agent
+	// CLI is yamux server — accepts streams opened by the agent.
 	mux, err := yamux.Server(relayConn, nil)
 	if err != nil {
 		return fmt.Errorf("client: yamux server: %w", err)
@@ -47,7 +48,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	go func() {
 		<-ctx.Done()
-		mux.Close()
+		_ = mux.Close()
 	}()
 
 	for {
@@ -64,7 +65,7 @@ func Run(ctx context.Context, cfg Config) error {
 			local, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", cfg.LocalPort))
 			if err != nil {
 				log.Printf("client: dial local port %d: %v", cfg.LocalPort, err)
-				s.Close()
+				_ = s.Close()
 				return
 			}
 			tunnel.Splice(s, local)

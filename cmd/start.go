@@ -1,9 +1,13 @@
 package cmd
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	k8sinternal "github.com/1mr0-tech/tether/internal/k8s"
@@ -11,69 +15,131 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var (
-	startNamespace string
-	startRelay     string
-)
+var startNamespace string
 
 var startCmd = &cobra.Command{
-	Use:   "start <deployment>",
-	Short: "Start intercepting a deployment's traffic",
-	Args:  cobra.ExactArgs(1),
+	Use:   "start [deployment]",
+	Short: "Intercept a deployment's traffic (interactive if no args given)",
+	Args:  cobra.MaximumNArgs(1),
 	RunE:  runStart,
 }
 
 func init() {
-	startCmd.Flags().StringVarP(&startNamespace, "namespace", "n", "default", "namespace of the deployment")
-	startCmd.Flags().StringVar(&startRelay, "relay", "", "relay server address (required)")
-	_ = startCmd.MarkFlagRequired("relay")
+	startCmd.Flags().StringVarP(&startNamespace, "namespace", "n", "", "namespace of the deployment")
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
-	deploymentName := args[0]
+	ctx := cmd.Context()
 
-	client, err := buildK8sClient()
+	k8sClient, err := buildK8sClient()
 	if err != nil {
-		return fmt.Errorf("build k8s client: %w", err)
+		return fmt.Errorf("connect to cluster: %w", err)
 	}
 
-	// Find the Service that fronts this Deployment.
-	svc, targetPort, err := k8sinternal.FindServiceForDeployment(cmd.Context(), client, startNamespace, deploymentName)
+	// ── Read relay config from cluster ────────────────────────────────────────
+	cfg, err := k8sinternal.ReadConfig(ctx, k8sClient)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Found service %s (targetPort: %d)\n", svc.Name, targetPort)
 
-	// Generate session ID.
+	// For k3d / macOS: relay NodePort is not directly reachable — use port-forward.
+	if cfg.UsePortForward {
+		port := portFromAddr(cfg.RelayExternal)
+		fmt.Printf("Starting kubectl port-forward to relay (localhost:%s)...\n", port)
+		cancel, err := startPortForward(port)
+		if err != nil {
+			return fmt.Errorf("relay port-forward: %w\n  Ensure the relay pod is running: kubectl get pods -n tether", err)
+		}
+		defer cancel()
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+
+	// ── Namespace: use flag or prompt ─────────────────────────────────────────
+	namespace := startNamespace
+	if namespace == "" {
+		namespaces, err := k8sinternal.ListNamespaces(ctx, k8sClient)
+		if err != nil {
+			return err
+		}
+		if len(namespaces) == 0 {
+			return fmt.Errorf("no namespaces found (excluding system namespaces)")
+		}
+
+		fmt.Println()
+		fmt.Println("Available namespaces:")
+		for i, ns := range namespaces {
+			fmt.Printf("  %d) %s\n", i+1, ns)
+		}
+		fmt.Println()
+
+		namespace, err = pickFromList(reader, "Select namespace", namespaces)
+		if err != nil {
+			return err
+		}
+	}
+
+	// ── Deployment: use arg or prompt ─────────────────────────────────────────
+	deploymentName := ""
+	if len(args) > 0 {
+		deploymentName = args[0]
+	} else {
+		deployments, err := k8sinternal.ListDeployments(ctx, k8sClient, namespace)
+		if err != nil {
+			return err
+		}
+		if len(deployments) == 0 {
+			return fmt.Errorf("no deployments found in namespace %q", namespace)
+		}
+
+		fmt.Printf("Deployments in %q:\n", namespace)
+		for i, d := range deployments {
+			fmt.Printf("  %d) %s\n", i+1, d)
+		}
+		fmt.Println()
+
+		deploymentName, err = pickFromList(reader, "Select deployment", deployments)
+		if err != nil {
+			return err
+		}
+	}
+
+	// ── Find the service ──────────────────────────────────────────────────────
+	svc, targetPort, err := k8sinternal.FindServiceForDeployment(ctx, k8sClient, namespace, deploymentName)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\nFound service %s (targetPort: %d)\n", svc.Name, targetPort)
+
+	// ── Generate session ID ───────────────────────────────────────────────────
 	sessionID, err := newSessionID()
 	if err != nil {
 		return err
 	}
 
-	// Signal the always-on agent (via relay) to open a listener on targetPort.
-	fmt.Printf("Opening relay session...\n")
-	if err := sendOpsCommand(startRelay, "open", sessionID, targetPort); err != nil {
+	// ── Signal agent to open a port listener ──────────────────────────────────
+	fmt.Println("Opening relay session...")
+	if err := sendOpsCommand(cfg.RelayExternal, "open", sessionID, cfg.PSK, targetPort); err != nil {
 		return fmt.Errorf("signal agent: %w", err)
 	}
 
-	// Get the agent pod's cluster IP to create Endpoints pointing at it.
-	agentIP, err := k8sinternal.GetAgentPodIP(cmd.Context(), client)
+	// ── Route the service to the agent pod ────────────────────────────────────
+	agentIP, err := k8sinternal.GetAgentPodIP(ctx, k8sClient)
 	if err != nil {
-		_ = sendOpsCommand(startRelay, "close", sessionID, 0)
+		_ = sendOpsCommand(cfg.RelayExternal, "close", sessionID, cfg.PSK, 0)
 		return err
 	}
 
-	// Route the Service to the agent pod (cross-namespace via Endpoints).
-	if err := k8sinternal.SwitchToAgent(cmd.Context(), client, startNamespace, svc.Name, agentIP, targetPort); err != nil {
-		_ = sendOpsCommand(startRelay, "close", sessionID, 0)
+	if err := k8sinternal.SwitchToAgent(ctx, k8sClient, namespace, svc.Name, agentIP, targetPort); err != nil {
+		_ = sendOpsCommand(cfg.RelayExternal, "close", sessionID, cfg.PSK, 0)
 		return fmt.Errorf("switch service: %w", err)
 	}
 
-	// Persist state for crash recovery via `tether stop`.
+	// ── Persist state for crash recovery ──────────────────────────────────────
 	state := &k8sinternal.SessionState{
 		SessionID:        sessionID,
-		Relay:            startRelay,
-		Namespace:        startNamespace,
+		Relay:            cfg.RelayExternal,
+		Namespace:        namespace,
 		ServiceName:      svc.Name,
 		OriginalSelector: svc.Spec.Selector,
 		TargetPort:       targetPort,
@@ -82,18 +148,46 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Printf("warning: could not save session state: %v\n", err)
 	}
 
-	// Build the opaque token — encodes relay addr + session ID.
-	tok := token.Encode(token.Session{ID: sessionID, Relay: startRelay})
+	// ── Build and print opaque session token ──────────────────────────────────
+	tok := token.Encode(token.Session{
+		ID:    sessionID,
+		Relay: cfg.RelayExternal,
+		PSK:   cfg.PSK,
+	})
 
-	fmt.Printf("\nIntercepting %s/%s → developer laptop\n\n", startNamespace, deploymentName)
-	fmt.Println("Share this with the developer:")
-	fmt.Printf("\n  tether connect --session %s --port <local-port>\n\n", tok)
+	fmt.Printf("\nIntercepting %s/%s → developer laptop\n", namespace, deploymentName)
+	fmt.Println()
+	fmt.Println("Share this command with the developer:")
+	fmt.Println()
+	fmt.Printf("  tether connect --session %s --port <local-port>\n", tok)
+	fmt.Println()
 	fmt.Printf("To stop:  tether stop --session %s\n", tok)
 	return nil
 }
 
-// sendOpsCommand dials the relay, sends a one-shot control command, and reads the ack.
-func sendOpsCommand(relayAddr, action, session string, port int) error {
+// pickFromList shows a prompt and accepts either a number or the item name.
+func pickFromList(r *bufio.Reader, prompt string, items []string) (string, error) {
+	for {
+		fmt.Printf("%s [1-%d]: ", prompt, len(items))
+		input, _ := r.ReadString('\n')
+		input = strings.TrimSpace(input)
+
+		if n, err := strconv.Atoi(input); err == nil {
+			if n >= 1 && n <= len(items) {
+				return items[n-1], nil
+			}
+		}
+		for _, item := range items {
+			if item == input {
+				return item, nil
+			}
+		}
+		fmt.Printf("  Invalid selection — enter a number between 1 and %d, or the exact name.\n", len(items))
+	}
+}
+
+// sendOpsCommand dials the relay, sends a one-shot control command with PSK, and reads the ack.
+func sendOpsCommand(relayAddr, action, session, psk string, port int) error {
 	conn, err := net.DialTimeout("tcp", relayAddr, 10*time.Second)
 	if err != nil {
 		return fmt.Errorf("dial relay %s: %w", relayAddr, err)
@@ -106,6 +200,7 @@ func sendOpsCommand(relayAddr, action, session string, port int) error {
 		"action":  action,
 		"session": session,
 		"port":    port,
+		"psk":     psk,
 	}); err != nil {
 		return fmt.Errorf("send command: %w", err)
 	}
@@ -122,3 +217,4 @@ func sendOpsCommand(relayAddr, action, session string, port int) error {
 	}
 	return nil
 }
+

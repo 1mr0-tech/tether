@@ -14,6 +14,7 @@ import (
 
 type Config struct {
 	RelayAddr string
+	PSK       string // pre-shared key — must match the relay server's PSK
 }
 
 type controlMsg struct {
@@ -36,8 +37,11 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	defer conn.Close()
 
-	// Register as the persistent control connection.
-	if err := json.NewEncoder(conn).Encode(map[string]string{"role": "control"}); err != nil {
+	// Register as the persistent control connection — include PSK.
+	if err := json.NewEncoder(conn).Encode(map[string]string{
+		"role": "control",
+		"psk":  cfg.PSK,
+	}); err != nil {
 		return fmt.Errorf("agent: control handshake: %w", err)
 	}
 	log.Printf("agent: control channel connected to %s", cfg.RelayAddr)
@@ -52,7 +56,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	go func() {
 		<-ctx.Done()
-		conn.Close()
+		_ = conn.Close()
 	}()
 
 	for {
@@ -73,11 +77,19 @@ func Run(ctx context.Context, cfg Config) error {
 			sessions[msg.Session] = cancel
 			mu.Unlock()
 
-			go func(sessionID string, port int, sCtx context.Context) {
-				if err := runSession(sCtx, cfg.RelayAddr, sessionID, port); err != nil {
+			go func(sessionID string, port int, sCtx context.Context, cancelFn context.CancelFunc) {
+				// Ensure cancel is always called when the session goroutine exits,
+				// even if the "close" control message is never received (CWE-400).
+				defer func() {
+					cancelFn()
+					mu.Lock()
+					delete(sessions, sessionID)
+					mu.Unlock()
+				}()
+				if err := runSession(sCtx, cfg.RelayAddr, cfg.PSK, sessionID, port); err != nil {
 					log.Printf("agent: session %s: %v", sessionID, err)
 				}
-			}(msg.Session, msg.Port, sCtx)
+			}(msg.Session, msg.Port, sCtx, cancel)
 
 			_ = enc.Encode(controlResp{Status: "ready"})
 
@@ -99,8 +111,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 // runSession opens a yamux tunnel to the relay for a given session,
 // then listens on the service port and forwards each connection as a new stream.
-func runSession(ctx context.Context, relayAddr, sessionID string, port int) error {
-	// Connect to relay as an agent data connection for this session.
+func runSession(ctx context.Context, relayAddr, psk, sessionID string, port int) error {
 	relayConn, err := net.Dial("tcp", relayAddr)
 	if err != nil {
 		return fmt.Errorf("dial relay: %w", err)
@@ -109,15 +120,16 @@ func runSession(ctx context.Context, relayAddr, sessionID string, port int) erro
 	if err := json.NewEncoder(relayConn).Encode(map[string]string{
 		"role":    "agent",
 		"session": sessionID,
+		"psk":     psk,
 	}); err != nil {
-		relayConn.Close()
+		_ = relayConn.Close()
 		return fmt.Errorf("data handshake: %w", err)
 	}
 
 	// yamux client — opens one stream per inbound service connection.
 	mux, err := yamux.Client(relayConn, nil)
 	if err != nil {
-		relayConn.Close()
+		_ = relayConn.Close()
 		return fmt.Errorf("yamux: %w", err)
 	}
 	defer mux.Close()
@@ -131,7 +143,7 @@ func runSession(ctx context.Context, relayAddr, sessionID string, port int) erro
 
 	go func() {
 		<-ctx.Done()
-		ln.Close()
+		_ = ln.Close()
 	}()
 
 	log.Printf("agent: session %s listening on :%d", sessionID, port)
@@ -150,7 +162,7 @@ func runSession(ctx context.Context, relayAddr, sessionID string, port int) erro
 			stream, err := mux.Open()
 			if err != nil {
 				log.Printf("agent: yamux open: %v", err)
-				c.Close()
+				_ = c.Close()
 				return
 			}
 			tunnel.Splice(c, stream)
