@@ -28,6 +28,10 @@ func init() {
 }
 
 func runConnect(cmd *cobra.Command, args []string) error {
+	if connectLocalPort < 1 || connectLocalPort > 65535 {
+		return fmt.Errorf("invalid port %d: must be 1-65535", connectLocalPort)
+	}
+
 	tok, err := token.Decode(connectSessionToken)
 	if err != nil {
 		return err

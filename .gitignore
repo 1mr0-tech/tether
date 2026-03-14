@@ -13,3 +13,6 @@ service-proxy-linux
 
 # macOS
 .DS_Store
+
+# Private technical documentation (owner-only)
+TECHNICAL.md

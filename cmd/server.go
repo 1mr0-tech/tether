@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/1mr0-tech/tether/internal/relay"
@@ -14,6 +15,9 @@ var serverCmd = &cobra.Command{
 	Short: "Run the relay server (deployed automatically in-cluster by 'tether install')",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		psk := os.Getenv("RELAY_PSK")
+		if psk == "" {
+			return fmt.Errorf("RELAY_PSK environment variable is not set — refusing to start without authentication")
+		}
 		return relay.NewServer(serverAddr, psk).ListenAndServe()
 	},
 }

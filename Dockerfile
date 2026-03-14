@@ -5,6 +5,6 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o tether .
 
-FROM gcr.io/distroless/static
+FROM gcr.io/distroless/static:nonroot
 COPY --from=builder /app/tether /tether
 ENTRYPOINT ["/tether"]
