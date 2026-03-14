@@ -154,6 +154,12 @@ Check firewall rules between the developer's machine and the relay.
 
 ---
 
+## Documentation
+
+Full usage guide, installation walkthroughs, and command reference: [DOCUMENTATION.md](DOCUMENTATION.md)
+
+---
+
 ## Repository
 
 [https://github.com/1mr0-tech/tether](https://github.com/1mr0-tech/tether)
