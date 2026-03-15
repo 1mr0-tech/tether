@@ -160,6 +160,24 @@ Full usage guide, installation walkthroughs, and command reference: [DOCUMENTATI
 
 ---
 
+## Why I built tether
+
+We have a developer who loves the "Added Fixes" commit. The one that turns a stable 80% deployment into a 40% dumpster fire. Meanwhile, the rest of the team spends two work days just trying to get a local replica of the cluster running.
+
+I'm the one managing the on-premise clusters. I don't have time for that.
+
+**The "No-Go" List:**
+
+- **Telepresence:** I'm not installing a daemon or a VPN just to route some traffic.
+- **mirrord:** I don't want to explain eBPF permissions to every dev at 9:00 AM.
+- **ktunnel:** My production YAMLs are not a playground for development sidecars.
+
+**The Tether Way:** I built tether to be invisible. Ops generates a token, the dev plugs it in, and the traffic moves. No root, no installs, no cluster pollution, and definitely no more excuses.
+
+Oh, and I'll be honest — I didn't build this alone. I used AI as a coding partner throughout. Not to mindlessly generate code, but to work through ideas, catch things I'd miss, and move faster than I could solo. The knowledge of how it works, the decisions behind it, and the debugging at 1am — that's all mine. The AI just kept up.
+
+---
+
 ## Repository
 
 [https://github.com/1mr0-tech/tether](https://github.com/1mr0-tech/tether)
